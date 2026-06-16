@@ -46,7 +46,11 @@ impl ClassData {
 
         let read_fields = |count: u32, data: &[u8], off: &mut usize| -> Result<Vec<EncodedField>> {
             let mut prev_idx = 0u32;
-            let mut out = Vec::with_capacity(count as usize);
+            // Cap the preallocation at the bytes remaining: every entry consumes >=1 byte,
+            // so a malformed `count` (a trusted uleb128 from the file) cannot exceed it.
+            // Without this, a crafted class_data drives a multi-GB Vec::with_capacity (a 37KB
+            // input reached a 26GB allocation -> abort), which is an uncontained DoS.
+            let mut out = Vec::with_capacity((count as usize).min(data.len().saturating_sub(*off)));
             for _ in 0..count {
                 let (idx_diff, n) = read_uleb128(data, *off).ok_or(DexError::Truncated("field_idx_diff".into()))?;
                 *off += n;
@@ -63,7 +67,11 @@ impl ClassData {
 
         let read_methods = |count: u32, data: &[u8], off: &mut usize| -> Result<Vec<EncodedMethod>> {
             let mut prev_idx = 0u32;
-            let mut out = Vec::with_capacity(count as usize);
+            // Cap the preallocation at the bytes remaining: every entry consumes >=1 byte,
+            // so a malformed `count` (a trusted uleb128 from the file) cannot exceed it.
+            // Without this, a crafted class_data drives a multi-GB Vec::with_capacity (a 37KB
+            // input reached a 26GB allocation -> abort), which is an uncontained DoS.
+            let mut out = Vec::with_capacity((count as usize).min(data.len().saturating_sub(*off)));
             for _ in 0..count {
                 let (idx_diff, n) = read_uleb128(data, *off).ok_or(DexError::Truncated("method_idx_diff".into()))?;
                 *off += n;
@@ -130,5 +138,31 @@ mod tests {
         assert!(cd.instance_fields.is_empty());
         assert!(cd.direct_methods.is_empty());
         assert!(cd.virtual_methods.is_empty());
+    }
+
+    #[test]
+    fn huge_method_count_errors_without_giant_allocation() {
+        // direct_methods_size = uleb128(0xFFFFFFFF) with no method bytes following. The
+        // count is attacker-controlled; preallocating it (Vec::with_capacity(count)) drove a
+        // ~26GB allocation -> abort. The capacity is now bounded by the remaining bytes, so
+        // this returns a clean Truncated error instead of OOMing.
+        let data = vec![
+            0x00, // pad (class_data_off = 1)
+            0x00, // static_fields_size = 0
+            0x00, // instance_fields_size = 0
+            0xFF, 0xFF, 0xFF, 0xFF, 0x0F, // direct_methods_size = 0xFFFFFFFF (uleb128)
+            0x00, // virtual_methods_size = 0
+        ];
+        let class_def = ClassDef {
+            class_idx: 0,
+            access_flags: 0,
+            superclass_idx: 0,
+            interfaces_off: 0,
+            source_file_idx: 0,
+            annotations_off: 0,
+            class_data_off: 1,
+            static_values_off: 0,
+        };
+        assert!(ClassData::parse(&data, &class_def).is_err());
     }
 }
