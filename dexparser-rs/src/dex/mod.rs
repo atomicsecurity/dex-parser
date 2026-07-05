@@ -24,11 +24,17 @@ pub use code_item::CodeItem;
 
 use crate::error::Result;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Parsed DEX file: raw bytes + parsed indices.
+///
+/// `data` is `Arc<[u8]>` (not `Rc`) so `DexFile` is `Send + Sync`: the scanner's
+/// pyo3 `Analysis` handle holds it across the plugin thread pool with the GIL
+/// released. The transient class/method iterators below still use `Rc<DexFile>`
+/// (single-thread, within one query).
 #[derive(Clone)]
 pub struct DexFile {
-    pub data: Rc<[u8]>,
+    pub data: Arc<[u8]>,
     pub header: DexHeader,
     pub strings: DexStrings,
     pub types: DexTypes,
@@ -40,7 +46,7 @@ pub struct DexFile {
 impl DexFile {
     /// Parse a DEX file from raw bytes.
     pub fn parse(data: &[u8]) -> Result<Self> {
-        let data = Rc::from(data as &[u8]);
+        let data = Arc::from(data as &[u8]);
         let header = DexHeader::parse(&data)?;
         let strings = DexStrings::parse(&data, &header)?;
         let types = DexTypes::parse(&data, &header)?;
